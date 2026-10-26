@@ -122,4 +122,4 @@ node tools/publish.mjs rename --config perf/benchmark-config.json \
   --map '{"integration/": "applications/", "": "performance/"}' bench/data.js
 ```
 
-Tests: `node --test test/`.
+Tests: `node --test "test/*.test.mjs"`.
