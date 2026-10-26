@@ -1,0 +1,214 @@
+name: Publish benchmark results
+
+# Publishes the results of a package's benchmark job on Buildkite. For a commit on the
+# default branch, they are added to the package's history (bench/history.json on its
+# gh-pages branch); for a pull request, a comment compares them with that history.
+#
+# Packages call this from a workflow that reacts to the commit status Buildkite posts for
+# the benchmark job (`on: status`). Such a workflow runs from the default branch with
+# access to secrets, also for pull requests from forks, so nothing from the benchmarked
+# commit is executed here: its results are validated as untrusted data. Call it pinned to
+# a commit; the tools are checked out at that same commit.
+
+on:
+  workflow_call:
+    inputs:
+      pipeline:
+        description: "The slug of the package's Buildkite pipeline"
+        required: true
+        type: string
+      artifact:
+        description: "The results file the benchmark job uploads"
+        type: string
+        default: benchmarks.json
+      config:
+        description: "The package's benchmark configuration, read from its default branch"
+        type: string
+        default: perf/benchmark-config.json
+      comment:
+        description: "Comment on pull requests; otherwise the comment goes to the job summary"
+        type: boolean
+        default: true
+    secrets:
+      BUILDKITE_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    if: github.event_name == 'status' && github.event.state == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # push the history to gh-pages
+      pull-requests: write  # comment on pull requests
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.event.sha }}
+      TOOLS: tools/tools/publish.mjs
+    steps:
+      # without it, the checkout below would silently use the default branch
+      - name: Check that the tools can be pinned
+        if: job.workflow_sha == ''
+        run: |
+          echo "The runner does not report the commit of this workflow (job.workflow_sha)"
+          exit 1
+
+      - name: Check out the publishing tools
+        uses: actions/checkout@v7
+        with:
+          repository: JuliaGPU/benchmark-action
+          ref: ${{ job.workflow_sha }}
+          path: tools
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Download the results
+        id: download
+        env:
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+          TARGET_URL: ${{ github.event.target_url }}
+          PIPELINE: ${{ inputs.pipeline }}
+          ARTIFACT: ${{ inputs.artifact }}
+          ON_MAIN: ${{ contains(github.event.branches.*.name, github.event.repository.default_branch) }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CONFIG: ${{ inputs.config }}
+        run: |
+          set -euo pipefail
+          # the status links to the job that ran the benchmarks
+          pattern="^https://buildkite\.com/julialang/${PIPELINE}/builds/([0-9]+)#([0-9a-f-]+)$"
+          if [[ ! "$TARGET_URL" =~ $pattern ]]; then
+            echo "Unexpected target URL: $TARGET_URL"
+            exit 1
+          fi
+          api="https://api.buildkite.com/v2/organizations/julialang/pipelines/${PIPELINE}/builds/${BASH_REMATCH[1]}"
+          job="${BASH_REMATCH[2]}"
+          auth="Authorization: Bearer $BUILDKITE_TOKEN"
+
+          build=$(curl -fsS -H "$auth" "$api")
+          if [[ "$(jq -r .commit <<<"$build")" != "$SHA" ]]; then
+            echo "Build does not match commit $SHA"
+            exit 1
+          fi
+          pull_request=$(jq -r '.pull_request.id // empty' <<<"$build")
+          measured=$(jq -r --arg job "$job" '.jobs[] | select(.id == $job) | .finished_at // empty' <<<"$build")
+
+          url=$(curl -fsS -H "$auth" "$api/jobs/$job/artifacts" |
+                jq -r --arg path "$ARTIFACT" '.[] | select(.path == $path) | .download_url')
+          if [[ -z "$url" ]]; then
+            echo "No benchmark results found"
+            exit 0
+          fi
+          curl -fsSL --max-filesize 20000000 -H "$auth" -o results.json "$url"
+
+          # what the history records about the run; the id makes publishing idempotent
+          gh api "repos/$REPO/commits/$SHA" --jq '{
+              commit: .sha, date: .commit.committer.date, url: .html_url,
+              subject: (.commit.message | split("\n")[0]),
+              author: (.author.login // .commit.author.name)}' |
+            jq --arg id "buildkite:$job" --arg build "$TARGET_URL" --arg measured "$measured" \
+              '. + {id: $id, build: $build, measured: $measured}' > run.json
+
+          # the configuration of the default branch: the benchmarked commit is not trusted.
+          # a package without one gets the defaults, but any other failure stops here:
+          # older data would be filed wrongly without its rules
+          if ! gh api -H "Accept: application/vnd.github.raw" \
+                 "repos/$REPO/contents/$CONFIG?ref=$DEFAULT_BRANCH" > config.json 2> config.err; then
+            if grep -q "HTTP 404" config.err; then
+              echo '{}' > config.json
+            else
+              cat config.err
+              exit 1
+            fi
+          fi
+          jq -e 'type == "object"' config.json > /dev/null
+
+          echo "results=results.json" >> "$GITHUB_OUTPUT"
+          echo "pull_request=$pull_request" >> "$GITHUB_OUTPUT"
+          # only commits on the default branch, as decided by GitHub, enter the history:
+          # Buildkite's branch name for a fork's pull request is chosen by the fork
+          if [[ -z "$pull_request" && "$ON_MAIN" == "true" ]]; then
+            echo "main=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the history
+        if: steps.download.outputs.results != ''
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          path: pages
+
+      - name: Add the results to the history
+        if: steps.download.outputs.main == 'true'
+        run: |
+          set -euo pipefail
+          cd pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p bench
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin gh-pages
+            git reset -q --hard origin/gh-pages
+            # also brings in what github-action-benchmark published, while it still runs
+            node "../$TOOLS" append --config ../config.json --repo "https://github.com/$REPO" \
+              --history bench/history.json --results ../results.json --run ../run.json \
+              --data bench/data.js
+            git add bench/history.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -q -m "Add benchmark results for $SHA"
+            if git push -q origin HEAD:gh-pages; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "Could not push the history"
+          exit 1
+
+      - name: Compare with the history
+        if: steps.download.outputs.pull_request != ''
+        env:
+          PR: ${{ steps.download.outputs.pull_request }}
+        run: |
+          set -euo pipefail
+          # the commits to compare with, newest first: the merge base and its ancestors
+          base=$(gh api "repos/$REPO/pulls/$PR" --jq .base.sha)
+          merge_base=$(gh api "repos/$REPO/compare/$base...$SHA" --jq .merge_base_commit.sha)
+          for page in 1 2 3 4 5 6 7 8 9 10; do
+            gh api "repos/$REPO/commits?sha=$merge_base&per_page=100&page=$page" --jq '.[].sha' > page.txt
+            cat page.txt >> ancestors.txt
+            [[ $(wc -l < page.txt) -eq 100 ]] || break
+          done
+          node "$TOOLS" comment --config config.json --history pages/bench/history.json \
+            --results results.json --run run.json --ancestors ancestors.txt --out comment.md \
+            --data pages/bench/data.js
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: steps.download.outputs.pull_request != '' && inputs.comment
+        env:
+          PR: ${{ steps.download.outputs.pull_request }}
+        run: |
+          set -euo pipefail
+          # results of an older commit must not replace those of the current one
+          head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          if [[ "$head" != "$SHA" ]]; then
+            echo "The pull request has moved on to $head"
+            exit 0
+          fi
+          existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- juliagpu-benchmarks -->"))) | .id' | tail -n 1)
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@comment.md > /dev/null
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
+
+      # the results are published either way; this makes the job fail for benchmarks the
+      # package has not put in a category
+      - name: Check the benchmark names
+        if: steps.download.outputs.results != ''
+        run: node "$TOOLS" check --config config.json --results results.json
