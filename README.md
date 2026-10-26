@@ -58,7 +58,10 @@ What a run of the suite uploads; times in nanoseconds:
                               "memory": 1856, "allocs": 55, "samples": 10000, "evals": 1}}}
 ```
 
-Every field is optional. `env` describes the run; the dashboard annotates changes of
+Every field is optional. `env` describes the run, including `packages`, the versions of its
+core dependencies (`{"GPUArrays": "12.1.1", ...}`): the dashboard and the PR comments list
+what changed between two runs, to explain changes the commit itself does not. The dashboard
+also annotates changes of
 `julia`, `gpu`, `driver`, `runtime`, `toolkit` and `os`, and does not compare values across
 a change of `gpu`.
 

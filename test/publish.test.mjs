@@ -207,3 +207,13 @@ test("first pull request comments still warn about benchmarks outside every cate
   const md = report(config, emptyHistory(), { benchmarks: { "array/copy": { min: 1 } } }, pr("2026-02-15T00:00:00Z"), []);
   assert.match(md, /\[!WARNING\][^]*array\/copy[^]*no history/);
 });
+
+test("pull request reports list the environment differences, packages included", () => {
+  const h = flat(30);
+  h.runs.forEach((r) => (r.env = { julia: "1.12.1", packages: { GPUArrays: "12.1.1", LLVM: "10.4.0" } }));
+  const results = validateResults({ version: 2, env: { julia: "1.12.2", packages: { GPUArrays: "12.2.0", LLVM: "10.4.0", "bad name": "1" } }, benchmarks: { "performance/x": { min: 100 } } });
+  assert.deepEqual(results.env.packages, { GPUArrays: "12.2.0", LLVM: "10.4.0" });
+  const md = report(config, h, results, { ...pr("2026-02-15T00:00:00Z"), env: results.env }, ["c29"]);
+  assert.match(md, /Julia `1\.12\.1` → `1\.12\.2`, GPUArrays `12\.1\.1` → `12\.2\.0`\./);
+  assert.doesNotMatch(md, /LLVM `/);
+});
