@@ -174,6 +174,16 @@ test("zero values take no part in relative changes", () => {
   close(S.chainIndex([s, series(1, 1, 2, 2)], 0, 3).level[3], 2);
 });
 
+test("zeroCrossing tells when a count starts or stops, not its size", () => {
+  const s = series(0, 0, 2, 3, 0, null);
+  assert.equal(S.zeroCrossing(s, 1, 2), 1);
+  assert.equal(S.zeroCrossing(s, 3, 4), -1);
+  assert.equal(S.zeroCrossing(s, 0, 4), 0);
+  assert.equal(S.zeroCrossing(s, 2, 3), 0);
+  assert.equal(S.zeroCrossing(s, 4, 5), null);
+  assert.equal(S.zeroCrossing(s, 1, 2, { boundaries: new Set([2]) }), null);
+});
+
 test("compareRuns refuses to judge across a boundary or without history", () => {
   const s = history(30, [50]);
   assert.equal(S.compareRuns(s, 29, 30, { boundaries: new Set([30]) }).boundary, true);

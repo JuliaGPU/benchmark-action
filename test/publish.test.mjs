@@ -156,6 +156,42 @@ test("pull request reports warn about benchmarks outside every category", () => 
   assert.match(md, /\*\*Other\*\*/);
 });
 
+// daily runs with the allocations of benchmarks `x`, `y` and `z`, as [allocs, bytes]
+function allocating(n, gpu = "A") {
+  const h = emptyHistory("https://github.com/JuliaGPU/CUDA.jl");
+  for (let i = 0; i < n; i++) {
+    const day = new Date(Date.UTC(2026, 0, 1 + i)).toISOString();
+    addRun(h, { id: `m${i}`, commit: `c${i}`, date: day, source: "juliagpu", env: { gpu } }, {
+      "performance/x": { min: 100, allocs: 0, memory: 0 },
+      "performance/y": { min: 100, allocs: 3, memory: 48 },
+      "performance/z": { min: 100, allocs: 0, memory: 0 },
+    });
+  }
+  return h;
+}
+const allocResults = {
+  env: { gpu: "A" },
+  benchmarks: {
+    "performance/x": { min: 100, allocs: 2, memory: 96 },
+    "performance/y": { min: 100, allocs: 0, memory: 0 },
+    "performance/z": { min: 100, allocs: 0, memory: 0 },
+  },
+};
+
+test("pull request reports list the benchmarks that start or stop allocating", () => {
+  const md = report(config, allocating(30), allocResults, { ...pr("2026-02-15T00:00:00Z"), env: { gpu: "A" } }, ["c29"]);
+  assert.match(md, /`x` \| none \| 2 \(96 B\) \| 🔴 allocates \|/);
+  assert.match(md, /`y` \| 3 \(48 B\) \| none \| 🟢 no longer allocates \|/);
+  assert.doesNotMatch(md, /`z` \| none/);
+  assert.match(md, /No unusual changes in time\./);
+  // without a history to estimate any noise from
+  assert.match(report(config, allocating(1), allocResults, { ...pr("2026-02-15T00:00:00Z"), env: { gpu: "A" } }, ["c0"]), /`x` .* 🔴 allocates/);
+  // but not across a change of GPU
+  const other = report(config, allocating(30), { ...allocResults, env: { gpu: "B" } }, { ...pr("2026-02-15T00:00:00Z"), env: { gpu: "B" } }, ["c29"]);
+  assert.doesNotMatch(other, /allocates/);
+  assert.match(other, /No unusual changes\./);
+});
+
 const categorized = { categories: [{ id: "performance" }, { id: "latency" }, { id: "applications" }] };
 const map = { "integration/": "applications/", "gemm/": "applications/gemm/", "": "performance/" };
 

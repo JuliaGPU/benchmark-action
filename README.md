@@ -110,7 +110,9 @@ median absolute deviation of the log ratios of its previous 40 changes, after th
 with `rebase`. A change is unusual when it is more than three times that, and more than the
 category's `floor`. In the history, it must also stand out from the level of the three runs
 before it and hold at the next run, so neither a single slow run nor the return from one is
-counted. Relative changes leave out zeros (a benchmark that does not allocate).
+counted. Relative changes leave out zeros (a benchmark that does not allocate), so pull
+request comments also list the benchmarks whose allocations go from none to some or back,
+however few and whatever the noise.
 
 ## Tools
 
